@@ -1,0 +1,151 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# shipyard: create a repo with the go-steer baseline applied, after the
+# maintainer approves. Request format and setup: shipyard/README.md.
+#
+# Flow: an issue titled "shipyard: <name>" with a ```shipyard block is
+# validated (no secrets); then the create job waits on the `shipyard`
+# environment, whose required reviewer is the maintainer and whose secret
+# holds the go-steer-shipyard App key. Only an approved run on main can
+# read that key.
+name: shipyard
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions: {}
+
+concurrency:
+  group: shipyard-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    # Org owners, members and go-steer-deckhand may request; anyone else's
+    # issue is ignored, so strangers can't queue approval requests.
+    if: >-
+      startsWith(github.event.issue.title, 'shipyard:') &&
+      github.event.issue.state == 'open' &&
+      (contains(fromJSON('["OWNER", "MEMBER"]'), github.event.issue.author_association) ||
+       github.event.issue.user.login == 'go-steer-deckhand[bot]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      name: ${{ steps.parse.outputs.name }}
+      description: ${{ steps.parse.outputs.description }}
+      language: ${{ steps.parse.outputs.language }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate request
+        id: parse
+        env:
+          # Issue text via env only: it is attacker-controlled.
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          ORG: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          reject() {
+            printf "Shipyard can't process this request: %s\n\nEdit the issue to fix it; shipyard checks again on every edit. Format: [shipyard/README.md](../blob/main/shipyard/README.md)\n" "$1" >"$RUNNER_TEMP/comment.md"
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file "$RUNNER_TEMP/comment.md"
+            exit 1
+          }
+          if ! shipyard/bin/parse-request.sh 2>"$RUNNER_TEMP/err"; then
+            reject "$(head -c 500 "$RUNNER_TEMP/err")"
+          fi
+          name=$(sed -n 's/^name=//p' "$GITHUB_OUTPUT" | tail -1)
+          if gh api "repos/$ORG/$name" >/dev/null 2>&1; then
+            reject "a repository named \`$name\` already exists."
+          fi
+          gh issue comment "$ISSUE" --repo "$REPO" --body "Request is valid. Waiting for the maintainer to approve the \`shipyard\` deployment: $RUN_URL"
+
+  create:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: shipyard
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Mint org token (administration only, for the one create call)
+        id: org-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.SHIPYARD_CLIENT_ID }}
+          private-key: ${{ secrets.SHIPYARD_PRIVATE_KEY }}
+          # Creating a repo needs an org-wide installation token: it can't be
+          # scoped to a repo that doesn't exist yet. It gets administration
+          # only (no contents) and is used for one API call; everything else
+          # uses the repo-scoped token below.
+          owner: ${{ github.repository_owner }} # zizmor: ignore[github-app]
+          permission-administration: write
+      - name: Create empty repository
+        env:
+          GH_TOKEN: ${{ steps.org-token.outputs.token }}
+          PHASE: create
+          ORG: ${{ github.repository_owner }}
+          NAME: ${{ needs.validate.outputs.name }}
+          DESCRIPTION: ${{ needs.validate.outputs.description }}
+          LANGUAGE: ${{ needs.validate.outputs.language }}
+          CODE_OWNER: ${{ vars.SHIPYARD_CODE_OWNER }}
+        run: shipyard/bin/create-repo.sh
+      - name: Mint token scoped to the new repository
+        id: repo-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.SHIPYARD_CLIENT_ID }}
+          private-key: ${{ secrets.SHIPYARD_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ needs.validate.outputs.name }}
+          permission-administration: write
+          permission-contents: write
+      - name: Apply the baseline
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PHASE: configure
+          ORG: ${{ github.repository_owner }}
+          NAME: ${{ needs.validate.outputs.name }}
+          DESCRIPTION: ${{ needs.validate.outputs.description }}
+          LANGUAGE: ${{ needs.validate.outputs.language }}
+          CODE_OWNER: ${{ vars.SHIPYARD_CODE_OWNER }}
+        run: shipyard/bin/create-repo.sh >"$RUNNER_TEMP/summary.md"
+      - name: Report and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "$RUNNER_TEMP/summary.md"
+          gh issue close "$ISSUE" --repo "$REPO" --reason completed
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" --body "Shipyard failed while creating the repository. Run log: $RUN_URL"

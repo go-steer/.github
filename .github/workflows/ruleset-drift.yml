@@ -1,0 +1,70 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ruleset-drift: nightly, compare every public repo's rulesets to
+# shipyard/rulesets/ and keep one "Ruleset drift report" issue up to date.
+# Uses only the workflow's own read token: no App key, no approval needed.
+# Bypass lists need admin to read, so they aren't compared here.
+name: ruleset drift
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ruleset-drift
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare rulesets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+        run: shipyard/bin/ruleset-drift.sh >"$RUNNER_TEMP/report.md"
+      - name: Update the report issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          title="Ruleset drift report"
+          drift=$(head -1 "$RUNNER_TEMP/report.md" | sed 's/^drift: //')
+          tail -n +3 "$RUNNER_TEMP/report.md" >"$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md" >>"$GITHUB_STEP_SUMMARY"
+          num=$(gh issue list --repo "$REPO" --state all --search "in:title \"$title\"" --json number,title |
+            jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+          if [[ -z "$num" ]]; then
+            if [[ "$drift" != 0 ]]; then
+              gh issue create --repo "$REPO" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+            fi
+            exit 0
+          fi
+          gh issue edit "$num" --repo "$REPO" --body-file "$RUNNER_TEMP/body.md"
+          if [[ "$drift" == 0 ]]; then
+            gh issue close "$num" --repo "$REPO" --reason completed 2>/dev/null || true
+          else
+            gh issue reopen "$num" --repo "$REPO" 2>/dev/null || true
+          fi
