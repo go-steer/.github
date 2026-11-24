@@ -1,0 +1,25 @@
+# Org-wide surveyor defaults for go-steer. Repos override with their own
+# .github/surveyor.yaml, read from their base branch. Keys under `locked`
+# cannot be overridden. Format: https://github.com/go-steer/surveyor/blob/main/docs/DESIGN.md#7-configuration
+#
+# Status: draft. surveyor is not built yet, so nothing reads this file.
+defaults:
+  mode: shadow                  # comments only until enforcement starts (DESIGN §9)
+  models:
+    default: claude-sonnet-5-5
+    deep: claude-opus-5-5
+    second_opinion: gemini-4-neon
+  escalate:
+    max_lines: 400
+    max_packages: 3
+    labels: ["review:deep"]
+  budget:
+    max_usd_per_pr: 5
+    max_usd_per_month: 1500
+billing:
+  gcp_project: go-steer-drydock
+locked:
+  rubrics: [core]
+  models_minimum: claude-sonnet-5-5
+  approval_never_for: [fork, first_time_contributor]
+allow_opt_out: true
