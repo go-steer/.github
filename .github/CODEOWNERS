@@ -1,0 +1,10 @@
+# Paths in go-steer/.github that must not merge on surveyor's approval alone.
+# Everything here shapes every go-steer repo: shared CI, surveyor's org
+# config, and repo creation. GitHub reads this file from the base branch and
+# Apps cannot be code owners, so no bot approval can clear these entries.
+/.github/CODEOWNERS          @mastersingh24
+/.github/workflows/          @mastersingh24
+/.github/surveyor.yaml       @mastersingh24
+/.github/dependabot.yml      @mastersingh24
+/workflow-templates/         @mastersingh24
+/shipyard/                   @mastersingh24
